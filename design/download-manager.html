@@ -1,0 +1,562 @@
+
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>下载管理器</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #18181c;
+      --surface-hover: #222228;
+      --fg: #e8e8ed;
+      --muted: #6b6b78;
+      --border: #2a2a32;
+      --accent: #4f8fff;
+      --accent-hover: #6ba3ff;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #f87171;
+      --radius: 8px;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.5 var(--font);
+      -webkit-font-smoothing: antialiased;
+    }
+    .app {
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 200px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .sidebar-logo {
+      padding: 20px 16px;
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--fg);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sidebar-logo svg { width: 20px; height: 20px; color: var(--accent); }
+    .sidebar-nav { flex: 1; padding: 12px 8px; }
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      color: var(--muted);
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      user-select: none;
+    }
+    .nav-item:hover { background: var(--surface-hover); color: var(--fg); }
+    .nav-item.active { background: rgba(79, 143, 255, 0.12); color: var(--accent); }
+    .nav-item svg { width: 18px; height: 18px; flex-shrink: 0; }
+    .nav-item span { font-size: 13px; }
+
+    /* Main */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      flex-shrink: 0;
+    }
+    .header-title { font-size: 15px; font-weight: 600; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 14px;
+      border-radius: var(--radius);
+      border: none;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn svg { width: 16px; height: 16px; }
+
+    /* Toolbar */
+    .toolbar {
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg);
+      flex-shrink: 0;
+    }
+    .toolbar-select { display: flex; align-items: center; gap: 8px; }
+    .toolbar-select input[type="checkbox"] {
+      width: 16px; height: 16px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+    .toolbar-actions { display: flex; gap: 8px; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { background: var(--surface-hover); color: var(--fg); }
+    .btn-danger { background: rgba(248, 113, 113, 0.15); color: var(--danger); border: 1px solid rgba(248, 113, 113, 0.3); }
+    .btn-danger:hover { background: rgba(248, 113, 113, 0.25); }
+
+    /* Task list */
+    .task-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 24px;
+    }
+    .task-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .task-table th {
+      text-align: left;
+      padding: 10px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    .task-table td {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .task-table tr:hover td { background: var(--surface); }
+    .task-table tr:last-child td { border-bottom: none; }
+
+    .col-check { width: 40px; }
+    .col-name { min-width: 200px; }
+    .col-progress { width: 200px; }
+    .col-status { width: 80px; }
+    .col-size { width: 80px; }
+    .col-actions { width: 120px; text-align: right; }
+
+    .task-name { font-weight: 500; }
+    .task-url { font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 400px; }
+
+    /* Progress bar */
+    .progress-wrap { display: flex; align-items: center; gap: 10px; }
+    .progress-bar {
+      flex: 1;
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+    .progress-fill.done { background: var(--success); }
+    .progress-text { font-size: 12px; color: var(--muted); min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* Status badge */
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .status-downloading { background: rgba(79, 143, 255, 0.15); color: var(--accent); }
+    .status-paused { background: rgba(251, 191, 36, 0.15); color: var(--warning); }
+    .status-completed { background: rgba(52, 211, 153, 0.15); color: var(--success); }
+    .status-failed { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status-downloading .status-dot { animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    .size-text { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+    /* Row actions */
+    .row-actions { display: flex; gap: 4px; justify-content: flex-end; }
+    .icon-btn {
+      width: 30px; height: 30px;
+      display: grid; place-items: center;
+      border: none; background: transparent;
+      color: var(--muted);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .icon-btn:hover { background: var(--surface-hover); color: var(--fg); }
+    .icon-btn.danger:hover { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+    .icon-btn svg { width: 16px; height: 16px; }
+
+    /* Empty state */
+    .empty {
+      text-align: center;
+      padding: 80px 24px;
+      color: var(--muted);
+    }
+    .empty svg { width: 48px; height: 48px; margin-bottom: 16px; opacity: 0.4; }
+    .empty p { font-size: 14px; }
+
+    /* Modal overlay */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .modal-overlay.open { opacity: 1; pointer-events: all; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 480px;
+      max-width: 90vw;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+      transform: scale(0.95);
+      transition: transform 0.2s;
+    }
+    .modal-overlay.open .modal { transform: scale(1); }
+    .modal-header {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-title { font-size: 15px; font-weight: 600; }
+    .modal-close { width: 28px; height: 28px; display: grid; place-items: center; border: none; background: transparent; color: var(--muted); border-radius: 6px; cursor: pointer; }
+    .modal-close:hover { background: var(--surface-hover); color: var(--fg); }
+    .modal-close svg { width: 18px; height: 18px; }
+    .modal-body { padding: 20px; }
+    .form-group { margin-bottom: 16px; }
+    .form-label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin-bottom: 6px; }
+    .form-input {
+      width: 100%;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--fg);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .form-input:focus { border-color: var(--accent); }
+    .form-input::placeholder { color: var(--muted); }
+    .form-hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .modal-footer { padding: 16px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+    .btn-secondary { background: var(--surface-hover); color: var(--fg); border: 1px solid var(--border); }
+    .btn-secondary:hover { background: var(--border); }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      下载管理器
+    </div>
+    <nav class="sidebar-nav">
+      <div class="nav-item active" data-tab="downloading">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span>下载任务</span>
+      </div>
+      <div class="nav-item" data-tab="completed">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        <span>已下载任务</span>
+      </div>
+      <div class="nav-item" data-tab="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+        <span>任务设置</span>
+      </div>
+    </nav>
+  </aside>
+
+  <!-- Main content -->
+  <main class="main">
+    <header class="header">
+      <span class="header-title">下载任务</span>
+      <button class="btn btn-primary" id="addTaskBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        新增任务
+      </button>
+    </header>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <div class="toolbar-select">
+        <input type="checkbox" id="selectAll" />
+        <label for="selectAll" style="font-size: 13px; color: var(--muted); cursor: pointer;">全选</label>
+      </div>
+      <div class="toolbar-actions">
+        <button class="btn btn-ghost" id="bulkPause">暂停</button>
+        <button class="btn btn-ghost" id="bulkStart">开始</button>
+        <button class="btn btn-ghost" id="bulkStop">停止</button>
+        <button class="btn btn-danger" id="bulkDelete">删除</button>
+      </div>
+    </div>
+
+    <!-- Task list -->
+    <div class="task-container">
+      <table class="task-table" id="taskTable">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="selectAllCol" /></th>
+            <th class="col-name">文件名</th>
+            <th class="col-progress">进度</th>
+            <th class="col-status">状态</th>
+            <th class="col-size">大小</th>
+            <th class="col-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="taskBody">
+          <tr data-id="1">
+            <td class="col-check"><input type="checkbox" class="task-check" /></td>
+            <td class="col-name">
+              <div class="task-name">Ubuntu 22.04 LTS 桌面版</div>
+              <div class="task-url">https://releases.ubuntu.com/22.04/ubuntu-22.04-desktop-amd64.iso</div>
+            </td>
+            <td class="col-progress">
+              <div class="progress-wrap">
+                <div class="progress-bar"><div class="progress-fill" style="width: 67%"></div></div>
+                <span class="progress-text">67%</span>
+              </div>
+            </td>
+            <td class="col-status"><span class="status status-downloading"><span class="status-dot"></span>下载中</span></td>
+            <td class="col-size"><span class="size-text">2.1 GB / 3.2 GB</span></td>
+            <td class="col-actions">
+              <div class="row-actions">
+                <button class="icon-btn" title="暂停" data-action="pause"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>
+                <button class="icon-btn danger" title="删除" data-action="delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+              </div>
+            </td>
+          </tr>
+          <tr data-id="2">
+            <td class="col-check"><input type="checkbox" class="task-check" /></td>
+            <td class="col-name">
+              <div class="task-name">VSCode Insiders 设置备份</div>
+              <div class="task-url">https://update.code.visualstudio.com/latest/insider/win32-x64-user/VSCode-win32-x64.zip</div>
+            </td>
+            <td class="col-progress">
+              <div class="progress-wrap">
+                <div class="progress-bar"><div class="progress-fill" style="width: 100%" class="done"></div></div>
+                <span class="progress-text">100%</span>
+              </div>
+            </td>
+            <td class="col-status"><span class="status status-completed"><span class="status-dot"></span>已完成</span></td>
+            <td class="col-size"><span class="size-text">86.2 MB</span></td>
+            <td class="col-actions">
+              <div class="row-actions">
+                <button class="icon-btn danger" title="删除" data-action="delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+              </div>
+            </td>
+          </tr>
+          <tr data-id="3">
+            <td class="col-check"><input type="checkbox" class="task-check" /></td>
+            <td class="col-name">
+              <div class="task-name">Figma 设计资源包</div>
+              <div class="task-url">https://cdn.example.com/design-resources-v3.tar.gz</div>
+            </td>
+            <td class="col-progress">
+              <div class="progress-wrap">
+                <div class="progress-bar"><div class="progress-fill" style="width: 0%"></div></div>
+                <span class="progress-text">0%</span>
+              </div>
+            </td>
+            <td class="col-status"><span class="status status-paused"><span class="status-dot"></span>已暂停</span></td>
+            <td class="col-size"><span class="size-text">— / 124 MB</span></td>
+            <td class="col-actions">
+              <div class="row-actions">
+                <button class="icon-btn" title="开始" data-action="start"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+                <button class="icon-btn danger" title="删除" data-action="delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+              </div>
+            </td>
+          </tr>
+          <tr data-id="4">
+            <td class="col-check"><input type="checkbox" class="task-check" /></td>
+            <td class="col-name">
+              <div class="task-name">Nginx 源码包</div>
+              <div class="task-url">https://nginx.org/download/nginx-1.25.0.tar.gz</div>
+            </td>
+            <td class="col-progress">
+              <div class="progress-wrap">
+                <div class="progress-bar"><div class="progress-fill" style="width: 23%"></div></div>
+                <span class="progress-text">23%</span>
+              </div>
+            </td>
+            <td class="col-status"><span class="status status-failed"><span class="status-dot"></span>失败</span></td>
+            <td class="col-size"><span class="size-text">— / 1.1 MB</span></td>
+            <td class="col-actions">
+              <div class="row-actions">
+                <button class="icon-btn" title="重试" data-action="start"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+                <button class="icon-btn danger" title="删除" data-action="delete"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Empty state -->
+      <div class="empty" id="emptyState" style="display: none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <p>暂无下载任务</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Add Task Modal -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title">新增下载任务</span>
+      <button class="modal-close" id="modalClose">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label" for="taskUrl">下载链接</label>
+        <input type="text" id="taskUrl" class="form-input" placeholder="https://example.com/file.zip" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="taskName">文件名（可选）</label>
+        <input type="text" id="taskName" class="form-input" placeholder="留空则自动从链接提取" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="taskPath">保存路径（可选）</label>
+        <input type="text" id="taskPath" class="form-input" placeholder="默认保存到下载目录" />
+      </div>
+      <p class="form-hint">支持 HTTP/HTTPS/FTP/Magnet 链接</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modalCancel">取消</button>
+      <button class="btn btn-primary" id="modalConfirm">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Tab navigation
+  document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+    });
+  });
+
+  // Modal controls
+  const modal = document.getElementById('modalOverlay');
+  const addBtn = document.getElementById('addTaskBtn');
+  const closeBtn = document.getElementById('modalClose');
+  const cancelBtn = document.getElementById('modalCancel');
+  const confirmBtn = document.getElementById('modalConfirm');
+  const urlInput = document.getElementById('taskUrl');
+  const nameInput = document.getElementById('taskName');
+  const pathInput = document.getElementById('taskPath');
+
+  function openModal() { modal.classList.add('open'); urlInput.focus(); }
+  function closeModal() { modal.classList.remove('open'); urlInput.value = ''; nameInput.value = ''; pathInput.value = ''; }
+
+  addBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  cancelBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+
+  confirmBtn.addEventListener('click', () => {
+    const url = urlInput.value.trim();
+    if (!url) { urlInput.focus(); return; }
+    closeModal();
+    // In real app: add task to list
+    alert('任务已添加：' + (nameInput.value || url.split('/').pop()));
+  });
+
+  urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') nameInput.focus(); });
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') pathInput.focus(); });
+  pathInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmBtn.click(); });
+
+  // Select all
+  const selectAll = document.getElementById('selectAll');
+  const selectAllCol = document.getElementById('selectAllCol');
+  const taskChecks = document.querySelectorAll('.task-check');
+
+  function updateSelectAll() {
+    const checked = document.querySelectorAll('.task-check:checked');
+    selectAll.checked = checked.length === taskChecks.length && taskChecks.length > 0;
+    selectAllCol.checked = selectAll.checked;
+  }
+
+  selectAll.addEventListener('change', () => {
+    taskChecks.forEach(cb => cb.checked = selectAll.checked);
+    selectAllCol.checked = selectAll.checked;
+  });
+  selectAllCol.addEventListener('change', () => {
+    taskChecks.forEach(cb => cb.checked = selectAllCol.checked);
+    selectAll.checked = selectAllCol.checked;
+  });
+  taskChecks.forEach(cb => cb.addEventListener('change', updateSelectAll));
+
+  // Row action buttons
+  document.querySelectorAll('.icon-btn[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const row = btn.closest('tr');
+      const name = row.querySelector('.task-name').textContent;
+      const action = btn.dataset.action;
+      // Demo: just log
+      console.log(action, name);
+    });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+/.claude
+/.env.example
+/.venv
+/backend-py/.venv
+/.vscode
+*.pyc
+/__pycache__
+/downloads
+/temp
