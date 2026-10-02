@@ -1,0 +1,425 @@
+diff --git a/backend-py/app.py b/backend-py/app.py
+index 7ad7660..589480d 100644
+--- a/backend-py/app.py
++++ b/backend-py/app.py
+@@ -15,6 +15,7 @@ import urllib.parse
+ import re
+ import hashlib
+ import secrets
++import shutil
+ from dataclasses import dataclass, field
+ from typing import Optional, Dict, List
+ from enum import Enum
+@@ -123,6 +124,8 @@ class DownloadTask:
+     metadata_received_at: float = 0  # Track when metadata was received (for magnet)
+     user_paused: bool = False  # Track if user manually paused this task
+     completed_at: float = 0  # Track when download was completed
++    target_dir: str = ""  # 最终保存目录：下载完成后文件会被移动到这里（不存在则新建）
++    final_paths: list = field(default_factory=list)  # 完成后文件/文件夹在目标目录中的实际路径（删除任务时使用）
+     _stop_event: any = field(default_factory=threading.Event)  # For HTTP download pause
+ 
+ # =============================================================================
+@@ -511,6 +514,7 @@ class DownloadManager:
+                 "--split", "16",
+                 "--bt-max-peers", "100",
+                 "--bt-seed-unverified=true",
++                "--seed-time=0",  # 下载完成后不做种（0 = 完成即停止）
+                 "--continue=true",
+                 "--quiet"
+             ]
+@@ -533,6 +537,10 @@ class DownloadManager:
+         """Collect list of files to delete for a task"""
+         files = []
+ 
++        # 已完成并移动过的任务：直接使用移动后的实际路径
++        if task.final_paths:
++            return [p for p in task.final_paths if os.path.exists(p)]
++
+         # For HTTP downloads, find the file by task name
+         if task.download_type == 'http' and task.name:
+             file_path = os.path.join(task.save_path, task.name)
+@@ -563,9 +571,20 @@ class DownloadManager:
+ 
+     def _delete_files_list(self, file_paths: list):
+         """Delete a list of files"""
++        downloads_root = os.path.normpath(self._downloads_dir)
++        temp_root = os.path.normpath(self._temp_path)
+         for file_path in file_paths:
+             try:
+-                if os.path.exists(file_path):
++                if os.path.isdir(file_path) and not os.path.islink(file_path):
++                    # 文件夹（多文件种子）：只允许删除下载目录/临时目录内部的内容
++                    norm = os.path.normpath(file_path)
++                    inside = any(norm.startswith(root + os.sep) for root in (downloads_root, temp_root))
++                    if not inside:
++                        logger.warning(f"Refuse to delete directory outside download dirs: {file_path}")
++                        continue
++                    shutil.rmtree(file_path)
++                    logger.info(f"Deleted directory: {file_path}")
++                elif os.path.exists(file_path):
+                     os.remove(file_path)
+                     logger.info(f"Deleted file: {file_path}")
+             except Exception as e:
+@@ -582,52 +601,148 @@ class DownloadManager:
+         except Exception as e:
+             logger.debug(f"Failed to clean up empty directories: {e}")
+ 
+-    def _move_downloaded_files(self, task: DownloadTask):
+-        """Move downloaded files to completed path"""
++    # ------------------------------------------------------------------
++    # 任务完成处理：停止做种 + 移动到指定目录
++    # ------------------------------------------------------------------
++    def _resolve_target_dir(self, save_path: str) -> str:
++        """解析任务的最终保存目录。
++
++        留空 -> 下载目录；填写 -> 下载目录下的子目录（也接受位于下载目录内的绝对路径）。
++        不允许跳出下载目录（如 ../）。
++        """
++        base = os.path.normpath(self._downloads_dir)
++        raw = (save_path or "").strip()
++        if not raw:
++            return base
++        if os.path.isabs(raw) and (os.path.normpath(raw) == base or os.path.normpath(raw).startswith(base + os.sep)):
++            return os.path.normpath(raw)
++        rel = raw.strip('/').strip('\\')
++        if not rel:
++            return base
++        target = os.path.normpath(os.path.join(base, rel))
++        if target != base and not target.startswith(base + os.sep):
++            raise ValueError("保存路径不合法：不能超出下载目录")
++        return target
++
++    def _is_task_work_dir(self, task: DownloadTask) -> bool:
++        """task.save_path 是否是该任务独立的临时工作目录 temp/<task_id>"""
++        work = os.path.normpath(task.save_path)
++        return work == os.path.join(os.path.normpath(self._temp_path), task.id)
++
++    def _unique_dest(self, target_dir: str, name: str) -> str:
++        """目标已存在同名文件/文件夹时，自动改名为 'name (1)'，避免覆盖"""
++        dst = os.path.join(target_dir, name)
++        if not os.path.exists(dst):
++            return dst
++        stem, ext = os.path.splitext(name) if not os.path.isdir(os.path.join(target_dir, name)) else (name, "")
++        i = 1
++        while True:
++            candidate = os.path.join(target_dir, f"{stem} ({i}){ext}")
++            if not os.path.exists(candidate):
++                return candidate
++            i += 1
++
++    def _stop_aria2_task(self, gid: str):
++        """彻底停止并移除 aria2 里的任务 —— 即“停止做种”，同时释放文件句柄以便移动"""
++        if not gid:
++            return
++        for method in ("aria2.forceRemove", "aria2.removeDownloadResult"):
++            try:
++                self._aria2_call(method, [gid])
++            except Exception as e:
++                logger.debug(f"{method} {gid} failed: {e}")
++        logger.info(f"Stopped aria2 task (no more seeding): {gid}")
++
++    def _move_downloaded_files(self, task: DownloadTask, paths: list = None) -> bool:
++        """把下载完成的内容从工作目录移动到任务指定的目录（不存在则新建）。成功返回 True"""
++        target = os.path.normpath(task.target_dir or self._downloads_dir)
++        src_dir = os.path.normpath(task.save_path)
++        if src_dir == target:
++            return True  # 已经在目标目录，无需移动
++        is_work_dir = self._is_task_work_dir(task)  # 必须在改 save_path 之前判断
++
+         try:
+-            completed_path = self._downloads_dir
+-            if completed_path == task.save_path:
+-                # Same path, no need to move
+-                return
+-
+-            os.makedirs(completed_path, exist_ok=True)
+-
+-            # For HTTP downloads
+-            if task.download_type == 'http' and task.name:
+-                src_path = os.path.join(task.save_path, task.name)
+-                dst_path = os.path.join(completed_path, task.name)
+-                if os.path.exists(src_path):
+-                    import shutil
+-                    shutil.move(src_path, dst_path)
+-                    logger.info(f"Moved file from {src_path} to {dst_path}")
+-                    return
+-
+-            # For BT/Magnet downloads, get files from aria2
+-            if task.download_type in ('bt', 'magnet') and task.aria2_gid:
+-                status = self._aria2_get_status(task.aria2_gid)
+-                if status and 'files' in status:
+-                    import shutil
+-                    for file_info in status['files']:
+-                        file_path = file_info.get('path', '')
+-                        if file_path and os.path.exists(file_path) and '[METADATA]' not in file_path:
+-                            filename = os.path.basename(file_path)
+-                            dst_path = os.path.join(completed_path, filename)
+-                            shutil.move(file_path, dst_path)
+-                            logger.info(f"Moved file from {file_path} to {dst_path}")
+-                    return
+-
+-            # Fallback: try to find files by task name pattern
+-            if task.name:
+-                import shutil
+-                for root, dirs, files in os.walk(task.save_path):
+-                    for file in files:
+-                        if task.name in file and file != '.torrent':
+-                            src_path = os.path.join(root, file)
+-                            dst_path = os.path.join(completed_path, file)
+-                            shutil.move(src_path, dst_path)
+-                            logger.info(f"Moved file from {src_path} to {dst_path}")
++            os.makedirs(target, exist_ok=True)
++
++            # 1) 找出需要移动的“顶层条目”（单个文件，或种子的根文件夹）
++            entries = []
++            if task.download_type == 'http':
++                if task.name:
++                    entries.append(os.path.join(src_dir, task.name))
++            else:
++                for p in (paths or []):
++                    if not p:
++                        continue
++                    try:
++                        rel = os.path.relpath(os.path.normpath(p), src_dir)
++                    except ValueError:
++                        continue
++                    if rel.startswith('..'):
++                        continue
++                    top = os.path.join(src_dir, rel.split(os.sep)[0])
++                    if top not in entries:
++                        entries.append(top)
++                # 兜底：独立工作目录下的所有内容都属于这个任务
++                if not entries and is_work_dir and os.path.isdir(src_dir):
++                    for n in os.listdir(src_dir):
++                        if not n.endswith(('.aria2', '.torrent')):
++                            entries.append(os.path.join(src_dir, n))
++
++            # 2) 逐个移动（跨磁盘时 shutil.move 会自动复制+删除）
++            moved, errors = [], []
++            for src in entries:
++                if not os.path.exists(src):
++                    continue
++                dst = self._unique_dest(target, os.path.basename(src))
++                try:
++                    shutil.move(src, dst)
++                    moved.append(dst)
++                    logger.info(f"Moved {src} -> {dst}")
++                except Exception as e:
++                    errors.append(f"{os.path.basename(src)}: {e}")
++                    logger.error(f"Failed to move {src} -> {dst}: {e}")
++
++            if moved:
++                task.final_paths = moved
++            if errors:
++                task.error_msg = "移动文件失败: " + "; ".join(errors)
++                return False
++
++            if moved:
++                task.save_path = target
++            elif entries:
++                logger.warning(f"Task {task.id}: nothing to move, source files not found in {src_dir}")
++
++            # 3) 清理该任务独立的临时工作目录（残留的 .aria2 控制文件等）
++            if is_work_dir and os.path.isdir(src_dir):
++                shutil.rmtree(src_dir, ignore_errors=True)
++            return True
+         except Exception as e:
++            task.error_msg = f"移动文件失败: {e}"
+             logger.error(f"Failed to move files for task {task.id}: {e}")
++            return False
++
++    def _on_bt_completed(self, task: DownloadTask, files: list):
++        """BT/磁力任务下载完成：先停止做种，再把文件移动到指定目录，最后标记完成"""
++        paths = [f.get('path', '') for f in (files or [])
++                 if '[METADATA]' not in f.get('path', '')]
++
++        task.metadata_received_at = 0
++        task.error_msg = ""
++        task.progress = 100.0
++        if task.total_bytes > 0:
++            task.downloaded_bytes = task.total_bytes
++        task.speed = 0
++        task.upload_speed = 0
++        task.connections = 0
++        task.completed_at = time.time()
++
++        # 关键：停止做种。aria2 在“下载完成”后会继续 active 做种并占用文件，
++        # 必须先把任务从 aria2 移除，才能停止上传、才能安全移动文件
++        self._stop_aria2_task(task.aria2_gid)
++
++        self._move_downloaded_files(task, paths)
++        task.status = DownloadStatus.COMPLETED
+ 
+     def _save_state(self):
+         """Save tasks state to disk"""
+@@ -648,6 +763,8 @@ class DownloadManager:
+                     'metadata_received_at': task.metadata_received_at,
+                     'user_paused': task.user_paused,
+                     'completed_at': task.completed_at,
++                    'target_dir': task.target_dir,
++                    'final_paths': task.final_paths,
+                 })
+             with open(self._state_file, 'w') as f:
+                 json.dump({
+@@ -689,6 +806,16 @@ class DownloadManager:
+                 task.metadata_received_at = task_data.get('metadata_received_at', 0)
+                 task.user_paused = task_data.get('user_paused', False)
+                 task.completed_at = task_data.get('completed_at', 0)
++                task.final_paths = task_data.get('final_paths', [])
++                target_dir = task_data.get('target_dir', '')
++                if not target_dir:
++                    # 旧版本保存的任务没有 target_dir：临时目录里的 -> 下载目录；已在指定目录里的 -> 原地不动
++                    norm_save = os.path.normpath(save_path)
++                    if norm_save == self._temp_path or norm_save.startswith(self._temp_path + os.sep):
++                        target_dir = self._downloads_dir
++                    else:
++                        target_dir = save_path
++                task.target_dir = target_dir
+ 
+                 # Initialize stop event for HTTP downloads
+                 task._stop_event = threading.Event()
+@@ -716,10 +843,7 @@ class DownloadManager:
+                             continue
+                         elif status and status.get('status') == 'complete':
+                             # Download completed while we were shut down
+-                            task.status = DownloadStatus.COMPLETED
+-                            task.progress = 100.0
+-                            task.completed_at = time.time()
+-                            self._move_downloaded_files(task)
++                            self._on_bt_completed(task, status.get('files', []))
+                             logger.info(f"Restored task {task.id}: {task.name} (completed while shut down)")
+                             continue
+ 
+@@ -746,6 +870,7 @@ class DownloadManager:
+         options = {
+             "dir": task.save_path,
+             "bt-tracker": ",".join(self.PUBLIC_TRACKERS),
++            "seed-time": "0",  # 下载完成后不做种
+         }
+ 
+         if task.download_type == 'magnet':
+@@ -1026,24 +1151,27 @@ class DownloadManager:
+                 parsed = urllib.parse.urlparse(real_url)
+                 name = os.path.basename(parsed.path) or "Untitled"
+ 
+-        # Handle save_path: if relative, join with downloads base directory
+-        if save_path:
+-            save_path = save_path.strip('/')  # Remove leading/trailing slashes
+-            if not os.path.isabs(save_path):
+-                save_path = os.path.join(self._downloads_dir, save_path)
+-        else:
+-            save_path = self.save_path
++        # 最终保存目录：留空 = 下载目录；填写 = 下载目录下的子目录，不存在则新建
++        try:
++            target_dir = self._resolve_target_dir(save_path)
++        except ValueError:
++            self.next_id -= 1
++            raise
++        os.makedirs(target_dir, exist_ok=True)
+ 
+-        # Create directory if not exists
+-        os.makedirs(save_path, exist_ok=True)
++        # 下载过程中使用该任务独立的临时工作目录，完成后再移动到 target_dir
++        work_dir = os.path.join(self._temp_path, task_id)
++        os.makedirs(work_dir, exist_ok=True)
+ 
+         task = DownloadTask(
+             id=task_id,
+             name=name,
+             url=real_url,
+             download_type=download_type,
+-            save_path=save_path
++            save_path=work_dir,
++            target_dir=target_dir,
+         )
++        save_path = target_dir
+ 
+         self.tasks[task_id] = task
+         logger.info(f"Added task: {task_id} ({download_type}) - {name} -> {save_path}")
+@@ -1080,6 +1208,7 @@ class DownloadManager:
+         options = {
+             "dir": task.save_path,
+             "bt-tracker": ",".join(self.PUBLIC_TRACKERS),
++            "seed-time": "0",  # 下载完成后不做种
+         }
+ 
+         logger.info(f"Starting BT download: {task.name}")
+@@ -1180,6 +1309,7 @@ class DownloadManager:
+                 last_speed_time = start_time
+                 last_speed_bytes = 0
+ 
++                os.makedirs(task.save_path, exist_ok=True)
+                 with open(filepath, mode) as f:
+                     for chunk in response.iter_content(chunk_size=64 * 1024):
+                         # Check if pause was requested
+@@ -1207,10 +1337,12 @@ class DownloadManager:
+                             last_speed_time = now
+                             last_speed_bytes = downloaded
+ 
+-                task.status = DownloadStatus.COMPLETED
+                 task.progress = 100.0
++                task.speed = 0
++                task.error_msg = ""
+                 task.completed_at = time.time()
+-                self._move_downloaded_files(task)
++                self._move_downloaded_files(task)   # 移动到指定目录
++                task.status = DownloadStatus.COMPLETED
+                 logger.info(f"Download completed: {task.name}")
+ 
+         except Exception as e:
+@@ -1301,6 +1433,8 @@ class DownloadManager:
+             # Delete downloaded files if requested
+             if delete_files:
+                 self._delete_files_list(files_to_delete)
++                if self._is_task_work_dir(task):
++                    shutil.rmtree(task.save_path, ignore_errors=True)
+ 
+             del self.tasks[task_id]
+             return True
+@@ -1415,11 +1549,8 @@ class DownloadManager:
+                         task.progress = (task.downloaded_bytes / task.total_bytes) * 100
+                         # Check if download is actually complete
+                         if task.downloaded_bytes >= task.total_bytes:
+-                            task.status = DownloadStatus.COMPLETED
+-                            task.progress = 100.0
+-                            task.completed_at = time.time()
+-                            task.save_path = self._settings.get('savePath', self.save_path)
+-                            self._move_downloaded_files(task)
++                            # 下载完成：停止做种 -> 移动到指定目录 -> 标记完成
++                            self._on_bt_completed(task, files)
+                         else:
+                             task.status = DownloadStatus.DOWNLOADING
+ 
+@@ -1443,12 +1574,7 @@ class DownloadManager:
+                     task.downloaded_bytes = 0
+                 else:
+                     # Real content has been downloaded
+-                    task.metadata_received_at = 0
+-                    task.status = DownloadStatus.COMPLETED
+-                    task.error_msg = ""
+-                    task.progress = 100.0
+-                    task.completed_at = time.time()
+-                    self._move_downloaded_files(task)
++                    self._on_bt_completed(task, files)
+ 
+             elif aria2_status == "error":
+                 task.metadata_received_at = 0
+@@ -1470,9 +1596,7 @@ class DownloadManager:
+                 # Stopped - don't mark as failed, just show as paused/waiting
+                 task.metadata_received_at = 0
+                 if has_actual_content and not is_metadata_only:
+-                    task.status = DownloadStatus.COMPLETED
+-                    task.completed_at = time.time()
+-                    self._move_downloaded_files(task)
++                    self._on_bt_completed(task, files)
+                 else:
+                     task.status = DownloadStatus.IDLE
+                     task.error_msg = "等待下载..."
+@@ -2038,6 +2162,7 @@ def _task_to_dict(task: DownloadTask) -> dict:
+         'url': task.url,
+         'type': task.download_type,
+         'savePath': task.save_path,
++        'targetDir': task.target_dir,
+         'status': task.status.value,
+         'progress': task.progress,
+         'downloaded': task.downloaded_bytes,
