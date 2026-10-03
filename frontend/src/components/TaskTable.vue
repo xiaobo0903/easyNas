@@ -133,6 +133,7 @@ async function handleDelete(taskId) {
           </td>
           <td class="col-name">
             <div class="task-name">{{ task.name || 'Untitled' }}</div>
+            <div v-if="task.status === 'idle' && task.errorMsg" class="task-hint">{{ task.errorMsg }}</div>
             <div class="task-url">{{ task.url }}</div>
             <div class="task-info">
               <span class="task-size">{{ formatSize(task.downloaded) }} / {{ formatSize(task.totalSize) }}</span>
@@ -249,6 +250,7 @@ async function handleDelete(taskId) {
 }
 
 .task-name { font-weight: 500; text-align: left; }
+.task-hint { font-size: 12px; color: #999; text-align: left; margin-top: 2px; }
 .task-url { font-size: 11px; color: var(--muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; text-align: left; }
 .task-info { display: flex; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 2px; flex-wrap: wrap; }
 .task-speed { color: var(--accent); }

@@ -972,7 +972,7 @@ class DownloadManager:
         result = self._aria2_call(
             "aria2.tellActive",
             [["status", "totalLength", "completedLength", "downloadSpeed",
-              "connections", "errorCode", "errorMessage", "files", "infoHash", "gid"]]
+              "connections", "errorCode", "errorMessage", "files", "infoHash", "gid", "seeder"]]
         )
         if "result" in result:
             return result["result"]
@@ -1100,6 +1100,44 @@ class DownloadManager:
                         logger.info(f"Started waiting BT/Magnet task: {task.id}")
                         if self._count_active_downloads() >= self._max_concurrent:
                             return
+
+    def _reap_seeding_slots(self):
+        """清理仍在做种、占着 aria2 并发名额的“幽灵”任务。
+
+        aria2 的 max-concurrent-downloads 会把做种中的任务也算进去，
+        做种任务不退出，新任务就会一直“队列中”。这里只清理：
+        已经完成的任务、或不属于任何任务的做种条目；正在下载的任务不会被动。
+        """
+        try:
+            active = self._aria2_get_active_downloads()
+        except Exception:
+            return
+        by_gid = {t.aria2_gid: t for t in self.tasks.values() if t.aria2_gid}
+        by_hash = {}
+        for t in self.tasks.values():
+            if t.download_type == 'magnet':
+                h = self._extract_infohash_from_magnet(t.url)
+                if h:
+                    by_hash[h] = t
+        for d in active:
+            total = int(d.get("totalLength", 0) or 0)
+            done = int(d.get("completedLength", 0) or 0)
+            seeding = str(d.get("seeder", "")).lower() == "true" or (total > 0 and done >= total)
+            if not seeding:
+                continue
+            gid = d.get("gid")
+            owner = by_gid.get(gid) or by_hash.get((d.get("infoHash") or "").lower())
+            if owner is None or owner.status == DownloadStatus.COMPLETED:
+                logger.info(f"Reaping seeding aria2 task {gid} (owner={owner.id if owner else None})")
+                self._stop_aria2_task(gid)
+
+    def _queue_reason(self) -> str:
+        """给“排队中”的任务一个可读的原因"""
+        try:
+            n = len(self._aria2_get_active_downloads())
+        except Exception:
+            n = 0
+        return f"排队中：下载引擎并发名额已满（{n}/{self._max_concurrent}），等待空位"
 
     def _decode_thunder(self, thunder_url: str) -> str:
         """Decode thunder:// URL to original URL"""
@@ -1560,6 +1598,7 @@ class DownloadManager:
 
             elif aria2_status == "waiting":
                 task.status = DownloadStatus.IDLE
+                task.error_msg = self._queue_reason()
 
             elif aria2_status == "complete":
                 if is_metadata_only and not has_actual_content:
@@ -1652,7 +1691,8 @@ def progress_updater():
         try:
             for task in manager.list_tasks():
                 manager.update_task_progress(task)
-            # Try to start next waiting task if capacity available
+            # 清理占着并发名额的做种任务，再尝试启动排队任务
+            manager._reap_seeding_slots()
             manager._start_next_waiting_task()
             # Save state every 30 seconds
             _save_counter += 1
